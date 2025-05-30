@@ -1,10 +1,11 @@
+```python
 import os
 import logging
 import requests
-import openai
 from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from openai import OpenAI
 import asyncio
 
 # Настройка логов
@@ -13,42 +14,43 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+# Загрузка токенов из окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-openai.api_key = OPENAI_API_KEY
+
+# Инициализация клиента OpenAI (v0.27+)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Стартовое сообщение"""
     await update.message.reply_text(
         "Отправь ссылку на карточку WB, и я всё проанализирую!"
     )
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка входящих ссылок"""
     try:
         url = update.message.text.strip()
-        await update.message.reply_text("\U0001F9E0 Анализ начался, подожди 20–30 секунд...")
+        await update.message.reply_text("🧠 Анализ начался, подожди 20–30 секунд...")
 
-        resp = requests.get(url, timeout=10)
-        if resp.status_code != 200:
-            raise Exception(f"Не удалось загрузить страницу. Код: {resp.status_code}")
+        # Получаем страницу карточки WB
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
 
         soup = BeautifulSoup(resp.text, "html.parser")
-        reviews_block = soup.find_all("span", class_="feedback__text")
-        questions_block = soup.find_all("div", class_="question__text")
+        # Собираем отзывы и вопросы (ограничение на 20/10 штук)
+        reviews = [tag.get_text(strip=True) for tag in soup.select(".feedback__text")][:20]
+        questions = [tag.get_text(strip=True) for tag in soup.select(".question__text")][:10]
 
-        reviews = [r.get_text(strip=True) for r in reviews_block][:20]
-        questions = [q.get_text(strip=True) for q in questions_block][:10]
-
-        reviews_text = "\n".join(reviews)
-        questions_text = "\n".join(questions)
-
+        # Формируем подсказку для AI
         prompt = (
-            f"Вот отзывы покупателей:\n{reviews_text}\n\n"
-            f"Вот вопросы:\n{questions_text}\n\n"
-            "На основе этого укажи, какие плюсы и минусы отражены в карточке товара, а какие нет. "
-            "Просто выдай \"✅ Отражены:...\" и \"❌ Не отражены:...\" без рекомендаций."
+            f"Вот отзывы покупателей:\n" + "\n".join(reviews)
+            + f"\n\nВот вопросы:\n" + "\n".join(questions)
+            + "\n\nУкажи \"✅ Отражены:...\" и \"❌ Не отражены:...\" без рекомендаций."
         )
 
-        completion = openai.ChatCompletion.create(
+        # Запрос к OpenAI через асинхронный клиент
+        resp_ai = await client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {"role": "system", "content": "Ты помощник, делаешь сухой анализ карточки Wildberries."},
@@ -57,22 +59,24 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             timeout=60
         )
 
-        result = completion.choices[0].message.content
-        await update.message.reply_text(f"\U0001F6D2 Анализ карточки Wildberries (v2):\n{result}")
+        answer = resp_ai.choices[0].message.content
+        await update.message.reply_text(f"🛒 Анализ карточки Wildberries (v2):\n{answer}")
 
-    except Exception:
+    except Exception as e:
         logging.exception("Ошибка при анализе карточки")
         await update.message.reply_text("Произошла ошибка при анализе карточки. Попробуй позже.")
 
 async def main():
-    # Создаем приложение
+    """Запуск бота"""
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    # Удаляем старый webhook и сбрасываем апдейты
+    # Удаляем старые вебхуки и сбрасываем апдейты
     await app.bot.delete_webhook(drop_pending_updates=True)
-    # Регистрируем хендлеры
+
+    # Обработчики команд и сообщений
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    # Запускаем приложение
+
+    # Старт Polling
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
@@ -80,3 +84,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+```
